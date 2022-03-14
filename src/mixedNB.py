@@ -14,10 +14,11 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 from scipy.stats import norm # norm.pdf(x, loc, scale) computes the probability density of x realized from a univariate Gaussian distribution with mean = loc, std = scale
 from scipy.stats import multivariate_normal # multivariate_normal(x, mean, cov) computes the probability density of x realizsed from a multivariate Gaussian distribution with mean vector = mean and covariance matrix = cov
+from scipy.special import gammaln # log of the absolute value of the gamma function
 from numpy.linalg import inv # compute the inverse of a nonsingular square matrix
 from numpy.linalg import pinv # compute the pseudo inverse in case the empirical scatter matrix is not invertible
+from numpy.linalg import slogdet # For square matrix M, sign, logdet = slogdet(M). Therefore, det(M) = sign * np.exp(logdet)
 from sklearn.metrics import accuracy_score  
-
 # %% Necessary data preprocessing and partitioning (Remember to change the current working directory to the directory of the folder hosting this script)
 path = "./dataset_31_credit-g.csv" # the dataset of interest should be placed in the same folder as this script
 data = pd.read_csv(path, header = 0)
@@ -312,7 +313,6 @@ class MixedNB():
             empirical_scatter_matrix_positive += np.dot((record - empirical_mean_positive).T, (record - empirical_mean_negative))
         for record in X_negative_continuous:
             empirical_scatter_matrix_negative += np.dot((record - empirical_mean_negative).T, (record - empirical_mean_negative))
-        # print(empirical_scatter_matrix_positive.shape, empirical_scatter_matrix_negative.shape)
         MAP_scatter_matrix_positive = 0 # initialization
         MAP_scatter_matrix_negative = 0 # initialization
         for record in X_positive_continuous:
@@ -437,10 +437,10 @@ class MixedNB():
             a dictionary of mu_0, lambda_0, alpha_0, beta_0 parameterizing a Normal-gamma distribution and their pre-specified values. The default value is {"mu_0": 0, "lambda_0" : 2, "alpha_0" : 1, "beta_0": 1}. Moreover, S_0, the scale matrix parameter, is set to be equal to the empirical scatter matrix.
         NIW_parameters: dict()
             a dictionary of mu_0, k_0 and v_0, the mean of the Normal prior and two strength parameters parameterizing a Normal-inverse-Wishart distribution and their pre-specified values. The default value is {"mu_0" : 0, "k_0" : 5, "v_0" : 5}
-        alpha_categorical_attribute: float
+        alpha_categorical_attribute: int
         the concentration parameter corresponding to each category of a categorical attribute. The default value is 5.
-        alpha_target_attribute: float
-        the concentration parameter corresponding to each category of the target attribute. The default value is 5.
+        alpha_target_attribute: int
+        the concentration parameter corresponding to each class of the target attribute. The default value is 5.
         naive_assumption : boolean
             If True (the default value), each continuous feature is indepdent of one another conditional on class and consequently is modeled as a univariate Gaussian for each class; othwrwise, all the continuous features are jointly modeled by a multivariate Gaussian for each class.
         
@@ -632,7 +632,7 @@ class MixedNB():
         Returns
         -------
         C: pandas DataFrame, shape = [num_samples, num_classes]
-            a pandas DataFrame that stores logP(x, y = 0/1| phi_MAP), values proportional to the probabilities for positive and negative
+            a pandas DataFrame that stores logP(x, y = 0/1|theta_MAP), values proportional to the probabilities for positive and negative
         
         """
         num_samples = X_test.shape[0]
@@ -669,7 +669,7 @@ class MixedNB():
         Returns
         -------
         C: pandas DataFrame, shape = [num_samples, num_classes]
-            a pandas DataFrame that stores logP(x, y = 0/1| phi_MAP), values proportional to the probabilities for positive and negative
+            a pandas DataFrame that stores logP(x, y = 0/1|theta_MAP), values proportional to the probabilities for positive and negative
         
         """
         num_samples = X_test.shape[0]
@@ -736,13 +736,265 @@ class MixedNB():
         C = C.idxmax(axis = 1)
         return C
     
+    def log_marginal_likelihood_naive_assumption(self, X, y, alpha_categorical_attribute = 5, alpha_target_attribute = 5, uni_gaussian_prior_strength_parameters = {"k_0" : 5, "v_0" : 5}):
+        """
+        Compute the log marginal likelihood associated with the Naive Bayes model with the naive assumption among the continuous attributes.
+        
+        Parameters
+        ----------
+        X : pandas DataFrame, shape = [num_samples, n_features]
+            a pandas DataFrame that contains the feature values of all the training samples
+        y : pandas Series, shape = [num_samples,]
+            a pandas Series that contains the class values of all the training samples
+        alpha_categorical_attribute : int
+            the concentration parameter corresponding to each category of a categorical attribute. The default is 5.
+        alpha_target_attribute : int
+            the concentration parameter corresponding to each class of the target attribute. The default is 5. 
+        uni_gaussian_prior_strength_parameters : int,
+            the two strength parameters corresponding to the Normal prior on the mean and the inverse Gamma prior on the variance of an univariate Gaussian. The default is {"k_0" : 5, "v_0" : 5}.
+
+        Returns
+        -------
+        log_marginal_lieklihood: float
+            the log marginal likelihood
+         
+        """
+        k_0 = uni_gaussian_prior_strength_parameters["k_0"]
+        v_0 = uni_gaussian_prior_strength_parameters["v_0"]
+        X_positive, num_positive, X_negative, num_negative = self.separateByClass(X, y)
+        X_positive_categorical = X_positive[self.categorical_attributes]
+        X_negative_categorical = X_negative[self.categorical_attributes]
+        X_categorical = pd.concat([X_positive_categorical, X_negative_categorical], axis = 0)
+        # marginal likelihood for all the categorical attributes
+        log_marginal_likelihood_categorical_positive = 0 # initialization
+        log_marginal_likelihood_categorical_negative = 0 # initializaiton
+        for attribute in self.categorical_attributes:
+            categories = np.unique(X_categorical[attribute])
+            num_categories = len(categories)
+            category_frequencies_plus_pseudo = {1: {}, 0: {}} # a dictionary to store the frequency of each of the attribute's category for each class plus the pseudo count.
+            for category in categories:
+                num_positive_attribute_category = X_positive[X_positive[attribute] == category].shape[0]
+                num_negative_attribute_category = X_negative[X_negative[attribute] == category].shape[0] 
+                category_frequencies_plus_pseudo[1][category] = (num_positive_attribute_category + alpha_categorical_attribute)
+                category_frequencies_plus_pseudo[0][category] = (num_negative_attribute_category + alpha_categorical_attribute)
+            log_gamma_frequency_plus_pseudo_summant_positive = 0 # initialization
+            log_gamma_frequency_plus_pseudo_summant_negative = 0 # initialization
+            sum_frequencies_plus_pseudo_positive = sum(category_frequencies_plus_pseudo[1].values())
+            sum_frequencies_plus_pseudo_negative = sum(category_frequencies_plus_pseudo[0].values())
+            for frequency_plus_pseudo in category_frequencies_plus_pseudo[1].values():
+                log_gamma_frequency_plus_pseudo_summant_positive += gammaln(frequency_plus_pseudo)
+            for frequency_plus_pseudo in category_frequencies_plus_pseudo[0].values():
+                log_gamma_frequency_plus_pseudo_summant_negative += gammaln(frequency_plus_pseudo)
+            log_gamma_frequency_plus_pseudo_summant_positive -= gammaln(sum_frequencies_plus_pseudo_positive)
+            log_gamma_frequency_plus_pseudo_summant_negative -= gammaln(sum_frequencies_plus_pseudo_negative)
+            log_gamma_pseudo_summant_positive = num_categories * gammaln(alpha_categorical_attribute) - gammaln(num_categories * alpha_categorical_attribute)
+            log_gamma_pseudo_summant_negative = num_categories * gammaln(alpha_categorical_attribute) - gammaln(num_categories * alpha_categorical_attribute)
+            log_marginal_likelihood_categorical_positive += log_gamma_frequency_plus_pseudo_summant_positive - log_gamma_pseudo_summant_positive
+            log_marginal_likelihood_categorical_negative += log_gamma_frequency_plus_pseudo_summant_negative - log_gamma_pseudo_summant_negative
+        # marginal likelihood for all the univariate Gaussian attributes
+        log_marginal_likelihood_continuous_positive = 0 # initialization
+        log_marginal_likelihood_continuous_negative = 0 # initialization
+        for attribute in self.continuous_attributes:
+            attribute_positive = X_positive[attribute]
+            attribute_negative = X_negative[attribute]
+            mu_0_positive = np.mean(attribute_positive)
+            std_0_positive = np.std(attribute_positive)
+            mu_0_negative = np.mean(attribute_negative)
+            std_0_negative = np.std(attribute_negative)
+            v_Nc_sigma_Nc_squared_positive = v_0 * np.square(std_0_positive) + (num_positive * k_0) / (k_0 + num_positive) * np.square(mu_0_positive - mu_0_positive)
+            v_Nc_sigma_Nc_squared_negative = v_0 * np.square(std_0_negative) + (num_negative * k_0) / (k_0 + num_negative) * np.square(mu_0_negative - mu_0_negative)
+            for record in X_positive[attribute]:
+                v_Nc_sigma_Nc_squared_positive += np.square(record - mu_0_positive)
+            for record in X_negative[attribute]:
+                v_Nc_sigma_Nc_squared_negative += np.square(record - mu_0_negative)
+            log_marginal_likelihood_continuous_positive += np.log(1 / (np.pi ** (num_positive / 2))) + (1 / 2) * np.log(k_0 / (k_0 + num_positive)) + (v_0 / 2) * np.log(v_0 * np.square(std_0_positive)) + gammaln((v_0 + num_positive) / 2) - (((v_0 + num_positive) / 2) * np.log(v_Nc_sigma_Nc_squared_positive) + gammaln(v_0 / 2))
+            log_marginal_likelihood_continuous_negative += np.log(1 / (np.pi ** (num_negative / 2))) + (1 / 2) * np.log(k_0 / (k_0 + num_negative)) + (v_0 / 2) * np.log(v_0 * np.square(std_0_negative)) + gammaln((v_0 + num_negative) / 2) - (((v_0 + num_negative) / 2) * np.log(v_Nc_sigma_Nc_squared_negative) + gammaln(v_0 / 2))   
+         # marginal likelihood for the target attribute   
+        log_marginal_likelihood_class = gammaln(num_positive + alpha_target_attribute) + gammaln(num_negative + alpha_target_attribute) - gammaln(num_positive + num_negative + 2 * alpha_target_attribute) - (2 * gammaln(alpha_target_attribute) - gammaln(2 * alpha_target_attribute))
+        log_marginal_likelihood = log_marginal_likelihood_categorical_positive + log_marginal_likelihood_categorical_negative + log_marginal_likelihood_continuous_positive + log_marginal_likelihood_continuous_negative + log_marginal_likelihood_class
+        return log_marginal_likelihood
+    
+    def log_marginal_likelihood(self, X, y, NIW_parameters = {"mu_0" : 0 ,"k_0" : 5, "v_0" : 5}, alpha_categorical_attribute = 5, alpha_target_attribute = 5):
+        """'
+        Compute the log marginal likelihood associated with the Naive Bayes model without the naive assumption among the continuous attributes.
+        Parameters
+        ----------
+        X : pandas DataFrame, shape = [num_samples, n_features]
+            a pandas DataFrame that contains the feature values of all the training samples
+        y : pandas Series, shape = [num_samples,]
+            a pandas Series that contains the class values of all the training samples
+        NIW_parameters: dict()
+            a dictionary of mu_0, k_0 and v_0, the mean of the Normal prior and two strength parameters parameterizing a Normal-inverse-Wishart distribution and their pre-specified values. The default value is {"mu_0" : 0, "k_0" : 5, "v_0" : 5}
+        alpha_categorical_attribute: int
+        the concentration parameter corresponding to each category of a categorical attribute. The default value is 5.
+        alpha_target_attribute: int
+        the concentration parameter corresponding to each class of the target attribute. The default value is 5.
+
+        Returns
+        -------
+        log_marginal_likelihood: float
+            the log marginal likelihood
+
+        """
+        mu_0 = NIW_parameters["mu_0"]
+        k_0 = NIW_parameters["k_0"]
+        v_0 = NIW_parameters["v_0"]
+        X_positive, num_positive, X_negative, num_negative = self.separateByClass(X, y)
+        X_positive_categorical = X_positive[self.categorical_attributes]
+        X_negative_categorical = X_negative[self.categorical_attributes]
+        X_categorical = pd.concat([X_positive_categorical, X_negative_categorical], axis = 0)
+        num_continuous_attributes = len(self.continuous_attributes)
+        X_positive_continuous = X_positive[self.continuous_attributes]
+        X_negative_continuous = X_negative[self.continuous_attributes]
+        X_positive_continuous = X_positive_continuous.to_numpy() # Convert to a multidimensional numpy array convenient for elementwise operations
+        X_negative_continuous = X_negative_continuous.to_numpy() # Convert to a multidimensional numpy array convenient for elementwise operations
+        empirical_mean_positive = np.sum(X_positive_continuous, axis = 0, keepdims = True)
+        empirical_mean_negative = np.sum(X_negative_continuous, axis = 0, keepdims = True)
+        S_prior_positive = 0 # initialization
+        S_prior_negative = 0 # initialization
+        for record in X_positive_continuous:
+            S_prior_positive += np.dot((record - empirical_mean_positive).T, (record - empirical_mean_positive))
+        for record in X_negative_continuous:
+            S_prior_negative += np.dot((record - empirical_mean_negative).T, (record - empirical_mean_negative))
+        S_positive = 0 # initialization
+        S_negative = 0 # initialization
+        for record in X_positive_continuous:
+            S_positive += np.dot(record.T, record)
+        for record in X_negative_continuous:
+            S_negative += np.dot(record.T, record)
+        mu_0 = np.array([mu_0] * num_continuous_attributes).reshape(1, -1) # expand mu_0 from a scalar to a vector of shape (1, num_continuous_attributes)
+        m_N_positive = (k_0 / (k_0 + num_positive)) * mu_0 + (num_positive / (k_0 + num_positive)) * empirical_mean_positive 
+        m_N_negative = (k_0 / (k_0 + num_negative)) * mu_0 + (num_negative / (k_0 + num_negative)) * empirical_mean_negative
+        S_posterior_positive = S_prior_positive + S_positive + k_0 * np.dot(mu_0.T, mu_0) - (k_0 + num_positive) * np.dot(m_N_positive.T, m_N_positive)
+        S_posterior_negative = S_prior_negative + S_negative + k_0 * np.dot(mu_0.T, mu_0) - (k_0 + num_negative) * np.dot(m_N_negative.T, m_N_negative)
+        # marginal likelihood for all the categorical attributes
+        log_marginal_likelihood_categorical_positive = 0 # initialization
+        log_marginal_likelihood_categorical_negative = 0 # initializaiton
+        for attribute in self.categorical_attributes:
+            categories = np.unique(X_categorical[attribute])
+            num_categories = len(categories)
+            category_frequencies_plus_pseudo = {1: {}, 0: {}} # a dictionary to store the frequency of each of the attribute's category for each class plus the pseudo count.
+            for category in categories:
+                num_positive_attribute_category = X_positive[X_positive[attribute] == category].shape[0]
+                num_negative_attribute_category = X_negative[X_negative[attribute] == category].shape[0] 
+                category_frequencies_plus_pseudo[1][category] = (num_positive_attribute_category + alpha_categorical_attribute)
+                category_frequencies_plus_pseudo[0][category] = (num_negative_attribute_category + alpha_categorical_attribute)
+            log_gamma_frequency_plus_pseudo_summant_positive = 0 # initialization
+            log_gamma_frequency_plus_pseudo_summant_negative = 0 # initialization
+            sum_frequencies_plus_pseudo_positive = sum(category_frequencies_plus_pseudo[1].values())
+            sum_frequencies_plus_pseudo_negative = sum(category_frequencies_plus_pseudo[0].values())
+            for frequency_plus_pseudo in category_frequencies_plus_pseudo[1].values():
+                log_gamma_frequency_plus_pseudo_summant_positive += gammaln(frequency_plus_pseudo)
+            for frequency_plus_pseudo in category_frequencies_plus_pseudo[0].values():
+                log_gamma_frequency_plus_pseudo_summant_negative += gammaln(frequency_plus_pseudo)
+            log_gamma_frequency_plus_pseudo_summant_positive -= gammaln(sum_frequencies_plus_pseudo_positive)
+            log_gamma_frequency_plus_pseudo_summant_negative -= gammaln(sum_frequencies_plus_pseudo_negative)
+            log_gamma_pseudo_summant_positive = num_categories * gammaln(alpha_categorical_attribute) - gammaln(num_categories * alpha_categorical_attribute)
+            log_gamma_pseudo_summant_negative = num_categories * gammaln(alpha_categorical_attribute) - gammaln(num_categories * alpha_categorical_attribute)
+            log_marginal_likelihood_categorical_positive += log_gamma_frequency_plus_pseudo_summant_positive - log_gamma_pseudo_summant_positive
+            log_marginal_likelihood_categorical_negative += log_gamma_frequency_plus_pseudo_summant_negative - log_gamma_pseudo_summant_negative
+        # marginal likelihood for the multivariate Gaussian attribute
+        det_S_prior_positive = slogdet(S_prior_positive)[0] * np.exp(slogdet(S_prior_positive)[1])
+        det_S_prior_negative = slogdet(S_prior_negative)[0] * np.exp(slogdet(S_prior_negative)[1])
+        det_S_posterior_positive = slogdet(S_posterior_positive)[0] * np.exp(slogdet(S_posterior_positive)[1])
+        det_S_posterior_negative = slogdet(S_posterior_negative)[0] * np.exp(slogdet(S_posterior_negative)[1])
+        log_marginal_likelihood_continuous_positive = np.log(1) - (num_positive * num_continuous_attributes / 2) * np.log(np.pi) + (num_continuous_attributes / 2) * (np.log(k_0) - np.log(k_0 + num_positive)) + (v_0 / 2) * np.log(det_S_prior_positive) + gammaln((v_0 + num_positive) / 2) - (((v_0 + num_positive) / 2) * np.log(det_S_posterior_positive) + gammaln(v_0 / 2))
+        log_marginal_likelihood_continuous_negative = np.log(1) - (num_negative * num_continuous_attributes / 2) * np.log(np.pi) + (num_continuous_attributes / 2) * (np.log(k_0) - np.log(k_0 + num_negative)) + (v_0 / 2) * np.log(det_S_prior_negative) + gammaln((v_0 + num_negative) / 2) - (((v_0 + num_negative) / 2) * np.log(det_S_posterior_negative) + gammaln(v_0 / 2))
+        # marginal likelihood for the target attribute   
+        log_marginal_likelihood_class = gammaln(num_positive + alpha_target_attribute) + gammaln(num_negative + alpha_target_attribute) - gammaln(num_positive + num_negative + 2 * alpha_target_attribute) - ((2 * gammaln(alpha_target_attribute)) - gammaln(2 * alpha_target_attribute))
+        log_marginal_likelihood = log_marginal_likelihood_categorical_positive + log_marginal_likelihood_categorical_negative + log_marginal_likelihood_continuous_positive + log_marginal_likelihood_continuous_negative + log_marginal_likelihood_class
+        return log_marginal_likelihood
+    
+    def BIC_naive_assumption(self, X, y):
+        """
+        Compute the BIC associated with the Naive Bayes model with the naive assumption among the continuous attributes.
+        Specifically, BIC = logp(D|theta_MLE) - (k / 2) * logN
+        D: the training set
+        k: the # of parameters estimated
+        N: the size of the training set
+        
+        Parameters
+        ----------
+        X : pandas DataFrame, shape = [num_samples, n_features]
+            a pandas DataFrame that contains the feature values of all the training samples
+        y : pandas Series, shape = [num_samples,]
+            a pandas Series that contains the class values of all the training samples
+            
+        Returns
+        -------
+        BIC: float
+            the value of the BIC
+
+        """
+        self.fit_MLE(X, y, naive_assumption = True)  # Obtain theta_MLE by performing the MLE procedure on the model
+        num_parameters_estimated = 0 # initialization
+        num_parameters_estimated += 1
+        for attribute in self.categorical_attributes:
+            num_parameters_estimated += (len(self.categorical_MLE[1][attribute].keys()) - 1) + (len(self.categorical_MLE[0][attribute].keys()) - 1)
+        num_parameters_estimated += 2 * len(self.continuous_attributes) * 2
+        sample_size = X.shape[0]
+        max_likelihood = 0 # initialization
+        penalty = (num_parameters_estimated / 2) * np.log(sample_size)
+        # logp(D|theta_MLE) = Simga_{i}logp(x_{i},y{i}|theta_MLE)
+        for index, value in enumerate(y.to_numpy()):
+            max_likelihood_record = 0 # initialization
+            max_likelihood_record += np.log(self.class_MLE[value])
+            for attribute in self.continuous_attributes:
+                max_likelihood_record += np.log(norm.pdf(X.iloc[index].loc[attribute], loc = self.uni_gaussian_MLE[value][attribute]["mu"], scale = np.sqrt(self.uni_gaussian_MLE[value][attribute]["variance"])))
+            for attribute in self.categorical_attributes:
+                max_likelihood_record += np.log(self.categorical_MLE[value][attribute][X.iloc[index].loc[attribute]])
+            max_likelihood += max_likelihood_record
+        BIC = max_likelihood - penalty
+        return BIC
+    
+    def BIC(self, X, y):
+        """
+        Compute the BIC associated with the Naive Bayes model without the naive assumption among the continuous attributes.
+        Specifically, BIC = logp(D|theta_MLE) - (k / 2) * logN
+        D: the training set
+        k: the # of parameters estimated
+        N: the size of the training set
+
+        Parameters
+        ----------
+        X : pandas DataFrame, shape = [num_samples, n_features]
+            a pandas DataFrame that contains the feature values of all the training samples
+        y : pandas Series, shape = [num_samples,]
+            a pandas Series that contains the class values of all the training samples
+
+        Returns
+        -------
+        BIC: float
+            the value of the BIC
+        """
+        self.fit_MLE(X, y, naive_assumption = False)  # Obtain theta_MLE by performing the MLE procedure on the model
+        num_parameters_estimated = 0 # initialization
+        num_parameters_estimated += 1
+        for attribute in self.categorical_attributes:
+            num_parameters_estimated += (len(self.categorical_MLE[1][attribute].keys()) - 1) + (len(self.categorical_MLE[0][attribute].keys()) - 1)
+        num_parameters_estimated += 2 * (len(self.continuous_attributes) + (len(self.continuous_attributes) * (len(self.continuous_attributes) + 1)) / 2)
+        sample_size = X.shape[0]
+        penalty = (num_parameters_estimated / 2) * np.log(sample_size)
+        # logp(D|theta_MLE) = Simga_{i}logp(x_{i},y{i}|theta_MLE)
+        max_likelihood = 0 # initialization
+        for index, value in enumerate(y.to_numpy()):
+            max_likelihood_record = 0 # initialization
+            max_likelihood_record += np.log(self.class_MLE[value])
+            multivariate_continuous_attribute = X[self.continuous_attributes].iloc[index].to_numpy()
+            max_likelihood_record += np.log(multivariate_normal.pdf(multivariate_continuous_attribute.ravel(), mean = self.multi_gaussian_MLE[value]["mean"].ravel(), cov = self.multi_gaussian_MLE[value]["cov"], allow_singular = True))
+            for attribute in self.categorical_attributes:
+                max_likelihood_record += np.log(self.categorical_MLE[value][attribute][X.iloc[index].loc[attribute]])
+            max_likelihood += max_likelihood_record
+        BIC = max_likelihood - penalty
+        return BIC
+        
 # %% Model training and testing
 mnb = MixedNB(continuous_attributes, categorical_attributes)
 mnb.fit_MAP(X_train, y_train, naive_assumption = True)
 y_pred = mnb.predict_MAP_naive_assumption(X_test)
 accuracy = accuracy_score(y_test, y_pred)
 
-mnb = MixedNB(continuous_attributes, categorical_attributes)
+mnb2 = MixedNB(continuous_attributes, categorical_attributes)
 mnb.fit_MAP(X_train, y_train, naive_assumption = False)
 y_pred = mnb.predict_MAP(X_test)
 accuracy = accuracy_score(y_test, y_pred)
@@ -756,7 +1008,6 @@ mnb = MixedNB(continuous_attributes, categorical_attributes)
 mnb.fit_MLE(X_train, y_train, naive_assumption = False)
 y_pred = mnb.predict_MLE(X_test)
 accuracy = accuracy_score(y_test, y_pred)
-
 
 
 
