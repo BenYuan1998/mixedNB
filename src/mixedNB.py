@@ -994,7 +994,7 @@ mnb.fit_MAP(X_train, y_train, naive_assumption = True)
 y_pred = mnb.predict_MAP_naive_assumption(X_test)
 accuracy = accuracy_score(y_test, y_pred)
 
-mnb2 = MixedNB(continuous_attributes, categorical_attributes)
+mnb = MixedNB(continuous_attributes, categorical_attributes)
 mnb.fit_MAP(X_train, y_train, naive_assumption = False)
 y_pred = mnb.predict_MAP(X_test)
 accuracy = accuracy_score(y_test, y_pred)
