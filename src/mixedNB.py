@@ -1009,5 +1009,23 @@ mnb.fit_MLE(X_train, y_train, naive_assumption = False)
 y_pred = mnb.predict_MLE(X_test)
 accuracy = accuracy_score(y_test, y_pred)
 
+# %% Model comparison using log marginal likelihood
+mnb = MixedNB(continuous_attributes, categorical_attributes)
+log_ML_naive_assumption = mnb.log_marginal_likelihood_naive_assumption(X_train, y_train) # the log marginal likelihood for this model is -24686.354330219354. 
+log_ML = mnb.log_marginal_likelihood(X_train, y_train) # the log marginal likelihood for this model -43383.58033911603.
+print(log_ML_naive_assumption, "\n", log_ML)
+# Based on log marginal likelihood, the first model is better than the second one.
+
+
+# %% Model comparison using BIC
+mnb = MixedNB(continuous_attributes, categorical_attributes) # the BIC for this model is -24670.962635847834. 
+BIC_naive_assumption = mnb.BIC_naive_assumption(X_train, y_train) # the BIC for this model is -24765.757815404275.
+BIC = mnb.BIC(X_train, y_train)
+print(BIC_naive_assumption, "\n", BIC)
+# Based on BIC, the first model is better than the second one. 
+
+
+
+
 
 
